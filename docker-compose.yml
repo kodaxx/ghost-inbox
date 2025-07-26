@@ -1,0 +1,31 @@
+version: '3.8'
+services:
+  ghostinbox:
+    build: .
+    container_name: ghostinbox
+    ports:
+      - "25:25"   # SMTP port
+      - "3000:3000" # Web dashboard
+    # Required for iptables and security features
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    environment:
+      # Replace with your own domain
+      MY_DOMAIN: example.com
+      # Gmail account that will receive all forwarded mail
+      REAL_EMAIL: yourusername@gmail.com
+      # Gmail app password (set in .env or your deployment environment)
+      GMAIL_APP_PASSWORD: yourapppassword
+      # Admin credentials for HTTP basic auth
+      ADMIN_USER: admin
+      ADMIN_PASSWORD: strongpassword
+    volumes:
+      - aliases-data:/data
+      - /lib/modules:/lib/modules:ro
+    restart: unless-stopped
+
+volumes:
+  aliases-data:
+    driver: local

@@ -1,0 +1,79 @@
+# Postfix main configuration for GhostInbox
+# Hostname and domain
+myhostname = ghostinbox
+mydomain = {{MY_DOMAIN}}
+
+# Listen on all interfaces
+inet_interfaces = all
+inet_protocols = ipv4
+
+# Disable local delivery: we don't use local mailbox
+mydestination =
+local_recipient_maps =
+
+# Virtual domain handling: pipe all mail for our domain through the ghostinbox transport
+virtual_mailbox_domains = $mydomain
+virtual_transport = ghostinbox:
+
+# Configure Gmail as the relay host for outgoing mail
+relayhost = [smtp.gmail.com]:587
+smtp_use_tls = yes
+smtp_sasl_auth_enable = yes
+# Use a static password map: user:password
+smtp_sasl_password_maps = static:{{REAL_EMAIL}}:{{GMAIL_APP_PASSWORD}}
+smtp_sasl_security_options = noanonymous
+smtp_tls_security_level = encrypt
+smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt
+
+# Anti-spam and abuse prevention measures
+# Rate limiting: max 20 messages per minute per client IP
+anvil_rate_time_unit = 60s
+smtpd_client_connection_rate_limit = 10
+smtpd_client_message_rate_limit = 20
+smtpd_client_recipient_rate_limit = 50
+smtpd_client_event_limit_exceptions = 127.0.0.1
+
+# Connection limits
+smtpd_client_connection_count_limit = 5
+default_process_limit = 50
+
+# Message size limits (10MB max)
+message_size_limit = 10485760
+
+# SMTP restrictions to prevent open relay
+smtpd_recipient_restrictions = 
+    reject_non_fqdn_recipient,
+    reject_unknown_recipient_domain,
+    permit_mynetworks,
+    check_recipient_access hash:/etc/postfix/recipient_access,
+    reject_unauth_destination,
+    reject_rbl_dnsbl zen.spamhaus.org,
+    reject_rbl_dnsbl bl.spamcop.net,
+    permit
+
+smtpd_sender_restrictions = 
+    reject_non_fqdn_sender,
+    reject_unknown_sender_domain,
+    permit_mynetworks,
+    reject_unauthenticated_sender_login_mismatch,
+    permit
+
+smtpd_client_restrictions = 
+    permit_mynetworks,
+    reject_rbl_dnsbl zen.spamhaus.org,
+    permit
+
+# Require HELO/EHLO
+smtpd_helo_required = yes
+smtpd_helo_restrictions = 
+    permit_mynetworks,
+    reject_non_fqdn_helo_hostname,
+    reject_invalid_helo_hostname,
+    permit
+
+# Trusted networks (only localhost)
+mynetworks = 127.0.0.0/8, [::1]/128
+
+# Logging for security monitoring
+maillog_file = /var/log/mail.log
+smtpd_tls_loglevel = 1

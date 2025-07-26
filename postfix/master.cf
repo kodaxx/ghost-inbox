@@ -1,0 +1,4 @@
+# Postfix master configuration for GhostInbox
+# The ghostinbox transport pipes mail to the Node.js handler script.
+ghostinbox unix  -       n       n       -       -       pipe
+  flags=Fqhu user=root argv=/usr/local/bin/node /app/handle-email.js ${recipient}

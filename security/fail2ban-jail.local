@@ -1,0 +1,67 @@
+[DEFAULT]
+# Ban IP for 1 hour after 5 attempts within 10 minutes
+bantime = 3600
+findtime = 600
+maxretry = 5
+backend = auto
+usedns = warn
+logencoding = auto
+enabled = false
+mode = normal
+filter = %(__name__)s[mode=%(mode)s]
+
+# Email notification (optional)
+destemail = {{REAL_EMAIL}}
+sender = fail2ban@{{MY_DOMAIN}}
+mta = sendmail
+protocol = tcp
+chain = INPUT
+port = 0:65535
+fail2ban_agent = Fail2Ban/%(fail2ban_version)s
+
+# Postfix/SMTP abuse protection
+[postfix-auth]
+enabled = true
+port = smtp,465,submission
+logpath = /var/log/mail.log
+backend = %(postfix_backend)s
+maxretry = 3
+bantime = 1800
+
+[postfix-rbl]
+enabled = true
+port = smtp,465,submission  
+logpath = /var/log/mail.log
+backend = %(postfix_backend)s
+maxretry = 1
+bantime = 86400
+
+[postfix-spam]
+enabled = true
+port = smtp,465,submission
+logpath = /var/log/mail.log
+backend = %(postfix_backend)s
+maxretry = 5
+bantime = 3600
+
+# Custom GhostInbox protection
+[ghostinbox-smtp-abuse]
+enabled = true
+port = smtp
+logpath = /var/log/mail.log
+filter = ghostinbox-smtp-abuse
+action = iptables-multiport[name=ghostinbox-smtp, port="smtp", protocol=tcp]
+maxretry = 10
+findtime = 300
+bantime = 7200
+
+# Dashboard login protection  
+[ghostinbox-dashboard]
+enabled = true
+port = http,https
+logpath = /var/log/ghostinbox.log
+filter = ghostinbox-dashboard
+action = iptables-multiport[name=ghostinbox-web, port="3000", protocol=tcp]
+maxretry = 5
+findtime = 600
+bantime = 1800

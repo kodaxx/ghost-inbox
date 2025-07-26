@@ -1,0 +1,18 @@
+# Postfix recipient access file
+# This file controls which recipients are allowed
+# Format: recipient_address  action
+
+# Reject common spam targets
+abuse@{{MY_DOMAIN}}     REJECT
+postmaster@{{MY_DOMAIN}} REJECT  
+admin@{{MY_DOMAIN}}     REJECT
+root@{{MY_DOMAIN}}      REJECT
+info@{{MY_DOMAIN}}      REJECT
+support@{{MY_DOMAIN}}   REJECT
+sales@{{MY_DOMAIN}}     REJECT
+marketing@{{MY_DOMAIN}} REJECT
+noreply@{{MY_DOMAIN}}   REJECT
+no-reply@{{MY_DOMAIN}}  REJECT
+
+# Allow all other addresses (wildcard behavior controlled by application)
+@{{MY_DOMAIN}}          OK
