@@ -1,7 +1,5 @@
 # GhostInbox
 
-# GhostInbox
-
 GhostInbox is a self‑hosted email alias server implemented with SvelteKit for the admin dashboard, Postfix for the SMTP server, and a SQLite database (via better‑sqlite3) for state management. It allows you to receive emails at unlimited aliases on your own domain (e.g. `netflix@yourdomain.com`), forward them to a real inbox (such as a Gmail account) and reply while preserving the alias.
 
 ## Features

@@ -1,6 +1,6 @@
-# AliasMailHub Security System
+# GhostInbox Security System
 
-AliasMailHub includes comprehensive security protections to prevent spam relay abuse, rate limit excessive connections, and automatically ban malicious IPs.
+GhostInbox includes comprehensive security protections to prevent spam relay abuse, rate limit excessive connections, and automatically ban malicious IPs.
 
 ## Security Features
 
@@ -108,8 +108,8 @@ node security/security.js unban 1.2.3.4
 - **postfix-auth**: Protects against SMTP authentication failures
 - **postfix-rbl**: Blocks IPs caught by RBL services
 - **postfix-spam**: Detects and blocks spam attempts
-- **aliasmailhub-smtp-abuse**: Custom filter for SMTP abuse patterns
-- **aliasmailhub-dashboard**: Protects web dashboard login
+- **ghostinbox-smtp-abuse**: Custom filter for SMTP abuse patterns
+- **ghostinbox-dashboard**: Protects web dashboard login
 
 ### Ban Policies
 - **3-5 violations** trigger temporary bans
@@ -139,7 +139,7 @@ The security system requires additional Docker privileges:
 
 ```yaml
 services:
-  aliasmailhub:
+  ghostinbox:
     build: .
     # Required for iptables and security features
     privileged: true
@@ -179,10 +179,10 @@ services:
 #### Fail2ban Not Starting
 ```bash
 # Check fail2ban logs
-docker exec aliasmailhub journalctl -u fail2ban
+docker exec ghostinbox journalctl -u fail2ban
 
 # Restart fail2ban
-docker exec aliasmailhub fail2ban-client restart
+docker exec ghostinbox fail2ban-client restart
 ```
 
 #### Legitimate IPs Getting Banned
@@ -199,8 +199,8 @@ node security/security.js unban 1.2.3.4
 #### High Resource Usage
 ```bash
 # Check security system performance
-docker exec aliasmailhub top
-docker exec aliasmailhub iptables -L -n | wc -l
+docker exec ghostinbox top
+docker exec ghostinbox iptables -L -n | wc -l
 
 # Clean up expired rules
 node security/security.js cleanup

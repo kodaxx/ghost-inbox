@@ -15,6 +15,11 @@ echo "Setting up security infrastructure..."
 # Start rsyslog for proper logging
 rsyslogd
 
+# Ensure log files exist
+mkdir -p /var/log
+touch /var/log/mail.log
+touch /var/log/ghostinbox.log
+
 # Setup fail2ban configuration
 echo "Configuring fail2ban..."
 mkdir -p /etc/fail2ban/jail.d
@@ -110,4 +115,10 @@ trap cleanup SIGTERM SIGINT
 
 # Start the SvelteKit server
 echo "Starting GhostInbox application..."
-node build/index.js
+
+# Ensure log directory exists and create the log file
+mkdir -p /var/log
+touch /var/log/ghostinbox.log
+
+# Start the application with logging to file
+node build/index.js >> /var/log/ghostinbox.log 2>&1

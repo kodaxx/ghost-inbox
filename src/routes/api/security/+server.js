@@ -6,7 +6,7 @@ let security = null;
 async function getSecurityManager() {
   if (!security) {
     try {
-      const { SecurityManager } = await import('../../../security/security.js');
+      const { SecurityManager } = await import('../../../../security/security.js');
       security = new SecurityManager();
     } catch (error) {
       console.warn('SecurityManager initialization failed:', error.message);

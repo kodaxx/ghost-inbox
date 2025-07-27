@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Security monitoring and IP management for AliasMailHub
+ * Security monitoring and IP management for GhostInbox
  * Monitors mail logs and implements rate limiting with IP banning
  */
 
@@ -40,7 +40,22 @@ const config = {
     // Add your trusted IPs here
   ],
   
-  logFile: '/var/log/aliasmailhub-security.log',
+  // Automatic permanent ban criteria
+  permanentBanThresholds: {
+    maxBanCount: 3,        // Permanent ban after 3 temporary bans
+    maxViolationCount: 10, // Permanent ban after 10 violations total
+    timeWindow: 86400,     // Consider violations within 24 hours
+    rapidViolations: 5,    // 5 violations within timeWindow triggers permanent ban
+    
+    // Specific violation patterns that trigger immediate permanent bans
+    criticalPatterns: {
+      maxEmailsInShortTime: 100,  // 100+ emails in 5 minutes = immediate permanent ban
+      maxConnectionsInShortTime: 200, // 200+ connections in 5 minutes = immediate permanent ban
+      timeWindow: 300  // 5 minutes
+    }
+  },
+  
+  logFile: process.env.SECURITY_LOG_PATH || '/var/log/ghostinbox.log',
   dbPath: process.env.DB_PATH || '/data/aliases.db'
 };
 
@@ -157,6 +172,86 @@ class SecurityManager {
     return config.whitelist.includes(ip);
   }
   
+  // Check if IP should be permanently banned based on behavior patterns
+  shouldPermanentlyBan(ip) {
+    this.ensureInitialized();
+    if (!this.initialized || !this.db || this.isWhitelisted(ip)) {
+      return { shouldBan: false, reason: 'system unavailable or whitelisted' };
+    }
+    
+    const now = Math.floor(Date.now() / 1000);
+    const timeWindow = config.permanentBanThresholds.timeWindow;
+    const criticalTimeWindow = config.permanentBanThresholds.criticalPatterns.timeWindow;
+    
+    // Get IP tracking data
+    const ipRecord = this.db.prepare('SELECT * FROM ip_tracking WHERE ip = ?').get(ip);
+    if (!ipRecord) {
+      return { shouldBan: false, reason: 'no tracking data' };
+    }
+    
+    // Check for critical patterns (immediate permanent ban)
+    const recentCriticalTime = now - criticalTimeWindow;
+    
+    // Check for massive email spam in short time
+    if (ipRecord.last_seen > recentCriticalTime) {
+      const currentMinute = Math.floor(now / 60);
+      const ipMinute = Math.floor(ipRecord.last_seen / 60);
+      
+      // If they've been active in the last 5 minutes and hit critical thresholds
+      if (currentMinute - ipMinute <= 5) {
+        if (ipRecord.email_count_minute > config.permanentBanThresholds.criticalPatterns.maxEmailsInShortTime) {
+          return { 
+            shouldBan: true, 
+            reason: `Critical pattern: ${ipRecord.email_count_minute} emails in 5 minutes (threshold: ${config.permanentBanThresholds.criticalPatterns.maxEmailsInShortTime})`,
+            severity: 'critical-email-spam'
+          };
+        }
+        
+        if (ipRecord.connection_count_minute > config.permanentBanThresholds.criticalPatterns.maxConnectionsInShortTime) {
+          return { 
+            shouldBan: true, 
+            reason: `Critical pattern: ${ipRecord.connection_count_minute} connections in 5 minutes (threshold: ${config.permanentBanThresholds.criticalPatterns.maxConnectionsInShortTime})`,
+            severity: 'critical-connection-flood'
+          };
+        }
+      }
+    }
+    
+    // Check ban count threshold
+    if (ipRecord.ban_count >= config.permanentBanThresholds.maxBanCount) {
+      return { 
+        shouldBan: true, 
+        reason: `Exceeded ban count threshold: ${ipRecord.ban_count} bans (max: ${config.permanentBanThresholds.maxBanCount})`,
+        severity: 'repeat-offender'
+      };
+    }
+    
+    // Check total violation count
+    if (ipRecord.violation_count >= config.permanentBanThresholds.maxViolationCount) {
+      return { 
+        shouldBan: true, 
+        reason: `Exceeded violation count threshold: ${ipRecord.violation_count} violations (max: ${config.permanentBanThresholds.maxViolationCount})`,
+        severity: 'persistent-violator'
+      };
+    }
+    
+    // Check for rapid violations within time window
+    const recentViolations = this.db.prepare(`
+      SELECT COUNT(*) as count FROM security_events 
+      WHERE ip = ? AND timestamp > ? AND event_type IN ('BAN', 'RATE_LIMIT')
+    `).get(ip, now - timeWindow);
+    
+    if (recentViolations.count >= config.permanentBanThresholds.rapidViolations) {
+      return { 
+        shouldBan: true, 
+        reason: `Rapid violations: ${recentViolations.count} violations in ${timeWindow/3600} hours (max: ${config.permanentBanThresholds.rapidViolations})`,
+        severity: 'rapid-violations'
+      };
+    }
+    
+    return { shouldBan: false, reason: 'within acceptable limits' };
+  }
+  
   async isBanned(ip) {
     this.ensureInitialized();
     if (!this.initialized || !this.db) return false;
@@ -224,12 +319,42 @@ class SecurityManager {
     const newHourCount = ipRecord.connection_count_hour + 1;
     
     if (newMinuteCount > config.maxConnectionsPerIP.perMinute) {
+      // Check if this should trigger a permanent ban
+      const permanentBanCheck = this.shouldPermanentlyBan(ip);
+      if (permanentBanCheck.shouldBan) {
+        await this.banIP(ip, `Auto-permanent ban: ${permanentBanCheck.reason}`, 'heavy', true);
+        this.log('CRITICAL', `Automatically permanently banned IP ${ip}: ${permanentBanCheck.reason}`);
+        return { allowed: false, reason: 'Permanently banned for persistent abuse' };
+      }
+      
       await this.banIP(ip, 'Too many connections per minute', 'light');
+      
+      // Log rate limit event for pattern tracking
+      this.db.prepare(`
+        INSERT INTO security_events (ip, event_type, details, action_taken)
+        VALUES (?, 'RATE_LIMIT', 'Connection limit exceeded per minute', 'Temporary ban applied')
+      `).run(ip);
+      
       return { allowed: false, reason: 'Rate limit exceeded: connections per minute' };
     }
     
     if (newHourCount > config.maxConnectionsPerIP.perHour) {
+      // Check if this should trigger a permanent ban
+      const permanentBanCheck = this.shouldPermanentlyBan(ip);
+      if (permanentBanCheck.shouldBan) {
+        await this.banIP(ip, `Auto-permanent ban: ${permanentBanCheck.reason}`, 'heavy', true);
+        this.log('CRITICAL', `Automatically permanently banned IP ${ip}: ${permanentBanCheck.reason}`);
+        return { allowed: false, reason: 'Permanently banned for persistent abuse' };
+      }
+      
       await this.banIP(ip, 'Too many connections per hour', 'medium');
+      
+      // Log rate limit event for pattern tracking
+      this.db.prepare(`
+        INSERT INTO security_events (ip, event_type, details, action_taken)
+        VALUES (?, 'RATE_LIMIT', 'Connection limit exceeded per hour', 'Temporary ban applied')
+      `).run(ip);
+      
       return { allowed: false, reason: 'Rate limit exceeded: connections per hour' };
     }
     
@@ -304,17 +429,62 @@ class SecurityManager {
     const newDayCount = ipRecord.email_count_day + 1;
     
     if (newMinuteCount > config.maxEmailsPerIP.perMinute) {
+      // Check if this should trigger a permanent ban
+      const permanentBanCheck = this.shouldPermanentlyBan(ip);
+      if (permanentBanCheck.shouldBan) {
+        await this.banIP(ip, `Auto-permanent ban: ${permanentBanCheck.reason}`, 'heavy', true);
+        this.log('CRITICAL', `Automatically permanently banned IP ${ip}: ${permanentBanCheck.reason}`);
+        return { allowed: false, reason: 'Permanently banned for persistent abuse' };
+      }
+      
       await this.banIP(ip, 'Too many emails per minute', 'light');
+      
+      // Log rate limit event for pattern tracking
+      this.db.prepare(`
+        INSERT INTO security_events (ip, event_type, details, action_taken)
+        VALUES (?, 'RATE_LIMIT', 'Email limit exceeded per minute', 'Temporary ban applied')
+      `).run(ip);
+      
       return { allowed: false, reason: 'Rate limit exceeded: emails per minute' };
     }
     
     if (newHourCount > config.maxEmailsPerIP.perHour) {
+      // Check if this should trigger a permanent ban
+      const permanentBanCheck = this.shouldPermanentlyBan(ip);
+      if (permanentBanCheck.shouldBan) {
+        await this.banIP(ip, `Auto-permanent ban: ${permanentBanCheck.reason}`, 'heavy', true);
+        this.log('CRITICAL', `Automatically permanently banned IP ${ip}: ${permanentBanCheck.reason}`);
+        return { allowed: false, reason: 'Permanently banned for persistent abuse' };
+      }
+      
       await this.banIP(ip, 'Too many emails per hour', 'medium');
+      
+      // Log rate limit event for pattern tracking
+      this.db.prepare(`
+        INSERT INTO security_events (ip, event_type, details, action_taken)
+        VALUES (?, 'RATE_LIMIT', 'Email limit exceeded per hour', 'Temporary ban applied')
+      `).run(ip);
+      
       return { allowed: false, reason: 'Rate limit exceeded: emails per hour' };
     }
     
     if (newDayCount > config.maxEmailsPerIP.perDay) {
+      // Check if this should trigger a permanent ban
+      const permanentBanCheck = this.shouldPermanentlyBan(ip);
+      if (permanentBanCheck.shouldBan) {
+        await this.banIP(ip, `Auto-permanent ban: ${permanentBanCheck.reason}`, 'heavy', true);
+        this.log('CRITICAL', `Automatically permanently banned IP ${ip}: ${permanentBanCheck.reason}`);
+        return { allowed: false, reason: 'Permanently banned for persistent abuse' };
+      }
+      
       await this.banIP(ip, 'Too many emails per day', 'heavy');
+      
+      // Log rate limit event for pattern tracking
+      this.db.prepare(`
+        INSERT INTO security_events (ip, event_type, details, action_taken)
+        VALUES (?, 'RATE_LIMIT', 'Email limit exceeded per day', 'Temporary ban applied')
+      `).run(ip);
+      
       return { allowed: false, reason: 'Rate limit exceeded: emails per day' };
     }
     
@@ -328,7 +498,7 @@ class SecurityManager {
     return { allowed: true, reason: 'within limits' };
   }
   
-  async banIP(ip, reason, severity = 'medium') {
+  async banIP(ip, reason, severity = 'medium', permanent = false) {
     this.ensureInitialized();
     if (!this.initialized || !this.db) {
       console.warn(`Cannot ban IP ${ip}: security system unavailable`);
@@ -341,32 +511,47 @@ class SecurityManager {
     }
     
     const now = Math.floor(Date.now() / 1000);
-    const duration = config.banDuration[severity];
-    const expiresAt = now + duration;
+    const duration = permanent ? 0 : config.banDuration[severity];
+    const expiresAt = permanent ? 0 : now + duration;
     
     // Check if already banned
     const existing = this.db.prepare('SELECT * FROM banned_ips WHERE ip = ?').get(ip);
     
     if (existing) {
-      // Extend ban or make it more severe
-      const newDuration = Math.max(duration, existing.ban_duration * 1.5);
-      const newExpiresAt = now + newDuration;
-      
-      this.db.prepare(`
-        UPDATE banned_ips 
-        SET ban_expires = ?, ban_reason = ?, ban_duration = ?
-        WHERE ip = ?
-      `).run(newExpiresAt, reason, newDuration, ip);
-      
-      this.log('WARN', `Extended ban for IP ${ip}: ${reason} (duration: ${newDuration}s)`);
+      // Update existing ban - make permanent if requested, or extend duration
+      if (permanent) {
+        this.db.prepare(`
+          UPDATE banned_ips 
+          SET ban_expires = 0, ban_reason = ?, ban_duration = 0, is_permanent = 1
+          WHERE ip = ?
+        `).run(reason, ip);
+        
+        this.log('WARN', `Made permanent ban for IP ${ip}: ${reason}`);
+      } else {
+        // Extend ban or make it more severe
+        const newDuration = Math.max(duration, existing.ban_duration * 1.5);
+        const newExpiresAt = now + newDuration;
+        
+        this.db.prepare(`
+          UPDATE banned_ips 
+          SET ban_expires = ?, ban_reason = ?, ban_duration = ?
+          WHERE ip = ?
+        `).run(newExpiresAt, reason, newDuration, ip);
+        
+        this.log('WARN', `Extended ban for IP ${ip}: ${reason} (duration: ${newDuration}s)`);
+      }
     } else {
       // New ban
       this.db.prepare(`
-        INSERT INTO banned_ips (ip, ban_expires, ban_reason, ban_duration)
-        VALUES (?, ?, ?, ?)
-      `).run(ip, expiresAt, reason, duration);
+        INSERT INTO banned_ips (ip, ban_expires, ban_reason, ban_duration, is_permanent)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(ip, expiresAt, reason, duration, permanent ? 1 : 0);
       
-      this.log('WARN', `Banned IP ${ip}: ${reason} (duration: ${duration}s)`);
+      if (permanent) {
+        this.log('WARN', `Permanently banned IP ${ip}: ${reason}`);
+      } else {
+        this.log('WARN', `Banned IP ${ip}: ${reason} (duration: ${duration}s)`);
+      }
     }
     
     // Update violation count
@@ -377,10 +562,11 @@ class SecurityManager {
     `).run(ip);
     
     // Log security event
+    const actionTaken = permanent ? 'Permanently banned' : `Banned for ${duration} seconds`;
     this.db.prepare(`
       INSERT INTO security_events (ip, event_type, details, action_taken)
       VALUES (?, 'BAN', ?, ?)
-    `).run(ip, reason, `Banned for ${duration} seconds`);
+    `).run(ip, reason, actionTaken);
     
     // Apply iptables rule
     await this.applyIPTablesRule(ip, 'DROP');
@@ -448,8 +634,8 @@ class SecurityManager {
     
     const stats = {
       totalBannedIPs: this.db.prepare('SELECT COUNT(*) as count FROM banned_ips').get().count,
-      activeBans: this.db.prepare('SELECT COUNT(*) as count FROM banned_ips WHERE ban_expires > strftime("%s", "now") OR is_permanent = 1').get().count,
-      recentEvents: this.db.prepare('SELECT COUNT(*) as count FROM security_events WHERE timestamp > strftime("%s", "now") - 3600').get().count,
+      activeBans: this.db.prepare("SELECT COUNT(*) as count FROM banned_ips WHERE ban_expires > strftime('%s', 'now') OR is_permanent = 1").get().count,
+      recentEvents: this.db.prepare("SELECT COUNT(*) as count FROM security_events WHERE timestamp > strftime('%s', 'now') - 3600").get().count,
       topViolators: this.db.prepare(`
         SELECT ip, violation_count, ban_count, last_seen 
         FROM ip_tracking 
@@ -482,9 +668,23 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       
     case 'ban':
       if (process.argv[3]) {
-        await security.banIP(process.argv[3], process.argv[4] || 'Manual ban', 'medium');
+        const ip = process.argv[3];
+        const reason = process.argv[4] || 'Manual ban';
+        const severity = process.argv[5] || 'medium';
+        await security.banIP(ip, reason, severity, false);
       } else {
-        console.log('Usage: node security.js ban <ip> [reason]');
+        console.log('Usage: node security.js ban <ip> [reason] [severity]');
+        console.log('  severity: light, medium, heavy');
+      }
+      break;
+      
+    case 'ban-permanent':
+      if (process.argv[3]) {
+        const ip = process.argv[3];
+        const reason = process.argv[4] || 'Manual permanent ban';
+        await security.banIP(ip, reason, 'heavy', true);
+      } else {
+        console.log('Usage: node security.js ban-permanent <ip> [reason]');
       }
       break;
       
@@ -496,7 +696,124 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       }
       break;
       
+    case 'list-bans':
+      security.ensureInitialized();
+      if (security.initialized && security.db) {
+        const bans = security.db.prepare(`
+          SELECT ip, banned_at, ban_expires, ban_reason, is_permanent,
+                 CASE 
+                   WHEN is_permanent = 1 THEN 'PERMANENT'
+                   WHEN ban_expires > strftime('%s', 'now') THEN 'ACTIVE'
+                   ELSE 'EXPIRED'
+                 END as status
+          FROM banned_ips 
+          ORDER BY banned_at DESC
+        `).all();
+        
+        console.log('Current IP bans:');
+        console.table(bans.map(ban => ({
+          IP: ban.ip,
+          Status: ban.status,
+          Reason: ban.ban_reason,
+          'Banned At': new Date(ban.banned_at * 1000).toISOString(),
+          'Expires At': ban.is_permanent ? 'NEVER' : new Date(ban.ban_expires * 1000).toISOString()
+        })));
+      } else {
+        console.log('Security system unavailable');
+      }
+      break;
+      
+    case 'check':
+      if (process.argv[3]) {
+        const ip = process.argv[3];
+        const isBanned = await security.isBanned(ip);
+        console.log(`IP ${ip} is ${isBanned ? 'BANNED' : 'NOT BANNED'}`);
+        
+        if (isBanned) {
+          security.ensureInitialized();
+          const banInfo = security.db.prepare('SELECT * FROM banned_ips WHERE ip = ?').get(ip);
+          if (banInfo) {
+            console.log('Ban details:', {
+              reason: banInfo.ban_reason,
+              bannedAt: new Date(banInfo.banned_at * 1000).toISOString(),
+              expiresAt: banInfo.is_permanent ? 'NEVER' : new Date(banInfo.ban_expires * 1000).toISOString(),
+              permanent: banInfo.is_permanent === 1
+            });
+          }
+        } else {
+          // Check if they should be permanently banned
+          const permanentBanCheck = security.shouldPermanentlyBan(ip);
+          if (permanentBanCheck.shouldBan) {
+            console.log(`⚠️  WARNING: IP ${ip} meets criteria for permanent ban:`);
+            console.log(`   Reason: ${permanentBanCheck.reason}`);
+            console.log(`   Severity: ${permanentBanCheck.severity}`);
+            console.log(`   Use: node security.js ban-permanent ${ip} "Auto-escalation: ${permanentBanCheck.reason}"`);
+          } else {
+            console.log(`IP ${ip} is within acceptable behavior limits.`);
+          }
+        }
+      } else {
+        console.log('Usage: node security.js check <ip>');
+      }
+      break;
+      
+    case 'review-candidates':
+      security.ensureInitialized();
+      if (security.initialized && security.db) {
+        console.log('Reviewing IPs that may qualify for permanent bans...\n');
+        
+        // Get IPs with high violation or ban counts
+        const candidates = security.db.prepare(`
+          SELECT ip, violation_count, ban_count, last_seen, first_seen
+          FROM ip_tracking 
+          WHERE (violation_count > 3 OR ban_count > 1)
+          AND ip NOT IN (SELECT ip FROM banned_ips WHERE is_permanent = 1)
+          ORDER BY violation_count DESC, ban_count DESC
+          LIMIT 20
+        `).all();
+        
+        if (candidates.length === 0) {
+          console.log('No IPs currently meet permanent ban criteria.');
+          break;
+        }
+        
+        console.log('Permanent ban candidates:');
+        for (const candidate of candidates) {
+          const permanentBanCheck = security.shouldPermanentlyBan(candidate.ip);
+          if (permanentBanCheck.shouldBan) {
+            console.log(`\n🚨 ${candidate.ip}:`);
+            console.log(`   Violations: ${candidate.violation_count}, Bans: ${candidate.ban_count}`);
+            console.log(`   First seen: ${new Date(candidate.first_seen * 1000).toISOString()}`);
+            console.log(`   Last seen: ${new Date(candidate.last_seen * 1000).toISOString()}`);
+            console.log(`   Reason: ${permanentBanCheck.reason}`);
+            console.log(`   Severity: ${permanentBanCheck.severity}`);
+            console.log(`   Command: node security.js ban-permanent ${candidate.ip} "Auto-escalation: ${permanentBanCheck.reason}"`);
+          } else {
+            console.log(`\n⚠️  ${candidate.ip}: ${candidate.violation_count} violations, ${candidate.ban_count} bans (monitoring)`);
+          }
+        }
+      } else {
+        console.log('Security system unavailable');
+      }
+      break;
+      
     default:
-      console.log('Usage: node security.js <stats|cleanup|ban|unban>');
+      console.log('Usage: node security.js <command> [args]');
+      console.log('Commands:');
+      console.log('  stats                       - Show security statistics');
+      console.log('  cleanup                     - Clean up expired bans');
+      console.log('  ban <ip> [reason] [severity]   - Ban an IP (light/medium/heavy)');
+      console.log('  ban-permanent <ip> [reason]    - Permanently ban an IP');
+      console.log('  unban <ip>                  - Unban an IP');
+      console.log('  list-bans                   - List all current bans');
+      console.log('  check <ip>                  - Check if an IP is banned or should be');
+      console.log('  review-candidates           - Review IPs that qualify for permanent bans');
+      console.log('');
+      console.log('Automatic permanent ban criteria:');
+      console.log(`  - ${config.permanentBanThresholds.maxBanCount}+ temporary bans`);
+      console.log(`  - ${config.permanentBanThresholds.maxViolationCount}+ total violations`);
+      console.log(`  - ${config.permanentBanThresholds.rapidViolations}+ violations in ${config.permanentBanThresholds.timeWindow/3600} hours`);
+      console.log(`  - ${config.permanentBanThresholds.criticalPatterns.maxEmailsInShortTime}+ emails in 5 minutes`);
+      console.log(`  - ${config.permanentBanThresholds.criticalPatterns.maxConnectionsInShortTime}+ connections in 5 minutes`);
   }
 }

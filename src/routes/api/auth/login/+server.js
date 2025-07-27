@@ -6,7 +6,7 @@ let security = null;
 async function getSecurityManager() {
   if (!security) {
     try {
-      const { SecurityManager } = await import('../../../../security/security.js');
+      const { SecurityManager } = await import('../../../../../security/security.js');
       security = new SecurityManager();
     } catch (error) {
       console.warn('SecurityManager initialization failed:', error.message);
@@ -69,7 +69,8 @@ export async function POST({ request, cookies }) {
       }
       return json({ success: true });
     } else {
-      console.log(`Login failed - invalid credentials for ${username} from ${clientIP}`);
+      // Format log message for fail2ban parsing
+      console.log(`[${new Date().toISOString()}] Login failed - invalid credentials for ${username} from ${clientIP}`);
       
       if (securityManager) {
         securityManager.log('WARN', `Failed login attempt: ${username} from ${clientIP}`);

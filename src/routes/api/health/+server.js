@@ -1,20 +1,20 @@
 import { json } from '@sveltejs/kit';
 import { spawn } from 'child_process';
 
-let security = null;
+let securityManagerInstance = null;
 
-// Safely initialize security manager only when needed
+// Safely initialize SecurityManager
 async function getSecurityManager() {
-  if (!security) {
+  if (!securityManagerInstance) {
     try {
       const { SecurityManager } = await import('../../../../security/security.js');
-      security = new SecurityManager();
+      securityManagerInstance = new SecurityManager();
     } catch (error) {
       console.warn('SecurityManager initialization failed:', error.message);
       return null;
     }
   }
-  return security;
+  return securityManagerInstance;
 }
 
 const execCommand = (command, args, timeout = 5000) => {

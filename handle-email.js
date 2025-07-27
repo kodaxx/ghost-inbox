@@ -76,10 +76,6 @@ function createAlias(name, last_sender = null) {
 function updateLastSender(name, sender) {
   return db.prepare('UPDATE aliases SET last_sender = ?, last_used_at = CURRENT_TIMESTAMP WHERE alias = ?').run(sender, name).changes > 0;
 }
-function blockOrEnabled(name) {
-  const rec = getAliasRecord(name);
-  return rec ? rec.enabled === 1 : true;
-}
 
 // Read entire stdin
 async function readStdin() {
@@ -204,6 +200,176 @@ function sendMail({ to, from, replyTo, subject, body }) {
   });
 }
 
+/**
+ * Handle email processing - main function that can be called for testing
+ * @param {string} rawEmail - Raw email content
+ * @param {string} recipient - Recipient email address (optional, will try to parse from headers)
+ * @returns {Promise<{success: boolean, forwarded: boolean, forwardedTo?: string, reason?: string}>}
+ */
+export async function handleEmail(rawEmail, recipient = null) {
+  try {
+    // Parse email to get recipient if not provided
+    const { headers, body } = parseEmail(rawEmail);
+    
+    // Determine recipient
+    let fullRecipient;
+    if (recipient) {
+      fullRecipient = recipient.toLowerCase();
+    } else {
+      // Try to extract from To header
+      const toHeader = headers['To'] || headers['to'] || '';
+      const toEmail = extractEmailAddress(toHeader);
+      if (!toEmail || !toEmail.endsWith(`@${domain}`)) {
+        return {
+          success: false,
+          forwarded: false,
+          reason: 'Invalid recipient domain'
+        };
+      }
+      fullRecipient = toEmail.toLowerCase();
+    }
+    
+    const aliasName = fullRecipient.split('@')[0];
+    const fullAlias = `${aliasName}@${domain}`;
+    
+    const fromHeader = headers['From'] || headers['from'];
+    const sender = extractEmailAddress(fromHeader) || '';
+    const subject = headers['Subject'] || headers['subject'] || '';
+
+    // Extract sender IP from Received headers for security checking
+    const senderIP = extractSenderIP(headers);
+    const securityManager = await getSecurityManager();
+    
+    // Security check: rate limiting and IP banning
+    if (senderIP && securityManager) {
+      const emailCheck = await securityManager.trackEmail(senderIP);
+      if (!emailCheck.allowed) {
+        console.log(`Blocking email from ${senderIP}: ${emailCheck.reason}`);
+        securityManager.log('WARN', `Blocked email from ${sender} (IP: ${senderIP}) to ${fullAlias}: ${emailCheck.reason}`);
+        
+        // Log the blocked attempt
+        securityManager.db.prepare(`
+          INSERT INTO security_events (ip, event_type, details, action_taken)
+          VALUES (?, 'EMAIL_BLOCKED', ?, 'Email dropped')
+        `).run(senderIP, `From: ${sender}, To: ${fullAlias}, Subject: ${subject}`);
+        
+        return {
+          success: true,
+          forwarded: false,
+          reason: `Blocked by security: ${emailCheck.reason}`
+        };
+      }
+      
+      // Log successful email for monitoring
+      securityManager.log('INFO', `Email processed from ${sender} (IP: ${senderIP}) to ${fullAlias}`);
+    }
+
+    // Determine whether this message originates from our destination mailbox
+    const isFromDestination = sender.toLowerCase() === destinationEmail.toLowerCase();
+
+    // Lookup alias
+    let record = getAliasRecord(aliasName);
+    if (!record) {
+      // Create alias automatically if wildcard enabled
+      if (getWildcardEnabled()) {
+        createAlias(aliasName, isFromDestination ? null : sender);
+        record = getAliasRecord(aliasName);
+      } else {
+        // Wildcards disabled; discard silently
+        console.log(`Dropping email to ${aliasName} because wildcard disabled and alias not found`);
+        return {
+          success: true,
+          forwarded: false,
+          reason: 'Alias not found and wildcards disabled'
+        };
+      }
+    }
+
+    // If alias is blocked, drop the message
+    if (record.enabled === 0) {
+      console.log(`Dropping email to ${aliasName} because alias is blocked`);
+      return {
+        success: true,
+        forwarded: false,
+        reason: 'Alias is blocked'
+      };
+    }
+
+    if (!isFromDestination) {
+      // External inbound message: update last sender
+      updateLastSender(aliasName, sender);
+      // Compose forwarded message to our destination mailbox
+      const fwdSubject = subject;
+      // Include original headers in the body for context
+      const fwdBody = `Forwarded message\nFrom: ${fromHeader}\nTo: ${headers['To'] || headers['to'] || ''}\nDate: ${headers['Date'] || headers['date'] || ''}\nSubject: ${subject}\n\n${body}`;
+      try {
+        await sendMail({
+          to: destinationEmail,
+          from: fullAlias,
+          replyTo: fullAlias,
+          subject: fwdSubject,
+          body: fwdBody
+        });
+        console.log(`Forwarded email for alias ${aliasName} to ${destinationEmail}`);
+        return {
+          success: true,
+          forwarded: true,
+          forwardedTo: destinationEmail
+        };
+      } catch (err) {
+        console.error('Error forwarding email', err);
+        return {
+          success: false,
+          forwarded: false,
+          reason: `SMTP error: ${err.message}`
+        };
+      }
+    } else {
+      // Message from our destination mailbox: treat as a reply to the last sender
+      const dest = record.last_sender;
+      if (!dest) {
+        console.log(`No last_sender recorded for alias ${aliasName}; dropping reply`);
+        return {
+          success: true,
+          forwarded: false,
+          reason: 'No last sender recorded for reply'
+        };
+      }
+      const replySubject = subject.startsWith('Re:') ? subject : `Re: ${subject}`;
+      // For replies we include body as is
+      try {
+        await sendMail({
+          to: dest,
+          from: fullAlias,
+          replyTo: fullAlias,
+          subject: replySubject,
+          body
+        });
+        console.log(`Relayed reply from ${destinationEmail} to ${dest} via alias ${aliasName}`);
+        return {
+          success: true,
+          forwarded: true,
+          forwardedTo: dest
+        };
+      } catch (err) {
+        console.error('Error relaying reply', err);
+        return {
+          success: false,
+          forwarded: false,
+          reason: `SMTP error: ${err.message}`
+        };
+      }
+    }
+  } catch (error) {
+    console.error('Error in handleEmail:', error);
+    return {
+      success: false,
+      forwarded: false,
+      reason: `Processing error: ${error.message}`
+    };
+  }
+}
+
 async function main() {
   // Determine the original alias from argument or environment
   const recipientArg = process.argv[2] || process.env.ORIGINAL_RECIPIENT;
@@ -211,108 +377,23 @@ async function main() {
     console.error('No recipient provided to handle-email.js');
     process.exit(1);
   }
-  const fullRecipient = recipientArg.toLowerCase();
-  const aliasName = fullRecipient.split('@')[0];
-  const fullAlias = `${aliasName}@${domain}`;
 
-  // Read and parse the raw email
+  // Read raw email from stdin
   const rawEmail = await readStdin();
-  const { headers, body } = parseEmail(rawEmail);
-  const fromHeader = headers['From'] || headers['from'];
-  const sender = extractEmailAddress(fromHeader) || '';
-  const subject = headers['Subject'] || headers['subject'] || '';
-
-  // Extract sender IP from Received headers for security checking
-  const senderIP = extractSenderIP(headers);
-  const securityManager = await getSecurityManager();
   
-  // Security check: rate limiting and IP banning
-  if (senderIP && securityManager) {
-    const emailCheck = await securityManager.trackEmail(senderIP);
-    if (!emailCheck.allowed) {
-      console.log(`Blocking email from ${senderIP}: ${emailCheck.reason}`);
-      securityManager.log('WARN', `Blocked email from ${sender} (IP: ${senderIP}) to ${fullAlias}: ${emailCheck.reason}`);
-      
-      // Log the blocked attempt
-      securityManager.db.prepare(`
-        INSERT INTO security_events (ip, event_type, details, action_taken)
-        VALUES (?, 'EMAIL_BLOCKED', ?, 'Email dropped')
-      `).run(senderIP, `From: ${sender}, To: ${fullAlias}, Subject: ${subject}`);
-      
-      return; // Drop the email
-    }
-    
-    // Log successful email for monitoring
-    securityManager.log('INFO', `Email processed from ${sender} (IP: ${senderIP}) to ${fullAlias}`);
-  }
-
-  // Determine whether this message originates from our destination mailbox
-  const isFromDestination = sender.toLowerCase() === destinationEmail.toLowerCase();
-
-  // Lookup alias
-  let record = getAliasRecord(aliasName);
-  if (!record) {
-    // Create alias automatically if wildcard enabled
-    if (getWildcardEnabled()) {
-      createAlias(aliasName, isFromDestination ? null : sender);
-      record = getAliasRecord(aliasName);
-    } else {
-      // Wildcards disabled; discard silently
-      console.log(`Dropping email to ${aliasName} because wildcard disabled and alias not found`);
-      return;
-    }
-  }
-
-  // If alias is blocked, drop the message
-  if (record.enabled === 0) {
-    console.log(`Dropping email to ${aliasName} because alias is blocked`);
-    return;
-  }
-
-  if (!isFromDestination) {
-    // External inbound message: update last sender
-    updateLastSender(aliasName, sender);
-    // Compose forwarded message to our destination mailbox
-    const fwdSubject = subject;
-    // Include original headers in the body for context
-    const fwdBody = `Forwarded message\nFrom: ${fromHeader}\nTo: ${headers['To'] || headers['to'] || ''}\nDate: ${headers['Date'] || headers['date'] || ''}\nSubject: ${subject}\n\n${body}`;
-    try {
-      await sendMail({
-        to: destinationEmail,
-        from: fullAlias,
-        replyTo: fullAlias,
-        subject: fwdSubject,
-        body: fwdBody
-      });
-      console.log(`Forwarded email for alias ${aliasName} to ${destinationEmail}`);
-    } catch (err) {
-      console.error('Error forwarding email', err);
-    }
-  } else {
-    // Message from our destination mailbox: treat as a reply to the last sender
-    const dest = record.last_sender;
-    if (!dest) {
-      console.log(`No last_sender recorded for alias ${aliasName}; dropping reply`);
-      return;
-    }
-    const replySubject = subject.startsWith('Re:') ? subject : `Re: ${subject}`;
-    // For replies we include body as is
-    try {
-      await sendMail({
-        to: dest,
-        from: fullAlias,
-        replyTo: fullAlias,
-        subject: replySubject,
-        body
-      });
-      console.log(`Relayed reply from ${destinationEmail} to ${dest} via alias ${aliasName}`);
-    } catch (err) {
-      console.error('Error relaying reply', err);
-    }
+  // Process the email
+  const result = await handleEmail(rawEmail, recipientArg);
+  
+  if (!result.success) {
+    console.error('Email processing failed:', result.reason);
+    process.exit(1);
   }
 }
 
-main().catch((err) => {
-  console.error('Unhandled error in handle-email.js', err);
-  process.exit(1);
-});
+// Only run main if this script is executed directly
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((err) => {
+    console.error('Unhandled error in handle-email.js', err);
+    process.exit(1);
+  });
+}
