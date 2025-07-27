@@ -11,6 +11,11 @@ services:
     cap_add:
       - NET_ADMIN
       - SYS_ADMIN
+    # Add DNS configuration for Gmail SMTP
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+      - 1.1.1.1
     environment:
       # Replace with your own domain
       MY_DOMAIN: example.com

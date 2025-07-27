@@ -7,23 +7,35 @@ RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
         postfix \
         libsasl2-modules \
+        libsasl2-modules-db \
+        sasl2-bin \
         ca-certificates \
         fail2ban \
         iptables \
-        rsyslog && \
+        rsyslog \
+        sudo \
+        python3 \
+        make \
+        g++ \
+        git \
+        procps \
+        ed \
+        dnsutils && \
     rm -rf /var/lib/apt/lists/*
 
 # Create directories for application and persistent data
 WORKDIR /app
 RUN mkdir -p /data
 
-# Copy package.json and package-lock.json if present, then install dependencies
-COPY package.json ./
+# Copy package files first for better Docker layer caching
+COPY package*.json ./
 COPY svelte.config.js ./
 COPY tailwind.config.js ./
 COPY vite.config.js ./
+COPY jsconfig.json ./
+
 # Install all dependencies (including dev) for building
-RUN npm install
+RUN npm ci
 
 # Copy the rest of the application source
 COPY . .
@@ -43,15 +55,19 @@ COPY postfix/recipient_access.template /app/postfix/recipient_access.template
 COPY security/ /app/security/
 
 # Create required directories and set permissions
-RUN mkdir -p /var/log /var/run/fail2ban /var/lib/fail2ban /etc/fail2ban/filter.d && \
-    chmod +x /app/security/security.js && \
-    chmod +x /app/handle-email.js && \
-    chmod 755 /app/security && \
-    # Copy fail2ban filters to proper location
-    cp /app/security/filter.d/* /etc/fail2ban/filter.d/ && \
+RUN mkdir -p /var/log /var/run/fail2ban /var/lib/fail2ban /etc/fail2ban/filter.d /etc/fail2ban/jail.d && \
     # Create log files with proper permissions
     touch /var/log/mail.log /var/log/ghostinbox.log && \
-    chmod 644 /var/log/mail.log /var/log/ghostinbox.log
+    chmod 644 /var/log/mail.log /var/log/ghostinbox.log && \
+    # Copy fail2ban filters to proper location
+    cp /app/security/filter.d/* /etc/fail2ban/filter.d/ && \
+    # Disable the default fail2ban jail configuration
+    echo '[DEFAULT]' > /etc/fail2ban/jail.d/defaults-debian.conf && \
+    echo 'enabled = false' >> /etc/fail2ban/jail.d/defaults-debian.conf && \
+    # Set executable permissions
+    chmod +x /app/security/security.js && \
+    chmod +x /app/handle-email.js && \
+    chmod 755 /app/security
 
 # Expose SMTP and HTTP ports
 EXPOSE 25 3000
@@ -64,9 +80,12 @@ ENV NODE_ENV=production \
     ADMIN_USER=admin \
     ADMIN_PASSWORD=changeme
 
-# Copy start script
+# Copy start script and set permissions
 COPY start.sh /start.sh
 RUN chmod +x /start.sh
+
+# The container needs to run as root for Postfix and fail2ban
+USER root
 
 # Start both Postfix and the Node server
 CMD ["/start.sh"]

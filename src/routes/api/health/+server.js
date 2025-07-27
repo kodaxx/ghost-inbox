@@ -99,19 +99,76 @@ async function checkDatabase() {
   try {
     console.log('Checking database connectivity...');
     
-    // Make an internal request to the aliases endpoint to test database
-    const response = await fetch('http://localhost:5173/api/aliases', {
-      headers: {
-        'Cookie': 'session=authenticated'
+    // First try to access the database directly
+    try {
+      const { default: Database } = await import('better-sqlite3');
+      const dbPath = process.env.DB_PATH || '/data/aliases.db';
+      console.log('Attempting to connect to database at:', dbPath);
+      
+      const db = new Database(dbPath);
+      
+      // Try a simple query to test the connection
+      const result = db.prepare('SELECT name FROM sqlite_master WHERE type="table" AND name="aliases"').get();
+      
+      if (result) {
+        // Verify we can actually query the aliases table
+        const aliasCount = db.prepare('SELECT COUNT(*) as count FROM aliases').get();
+        console.log(`Database direct connection successful - aliases table exists with ${aliasCount.count} entries`);
+        db.close();
+        return true;
+      } else {
+        // Database exists but aliases table doesn't - this might be a new installation
+        console.log('Database file exists but aliases table not found - checking if we can create it');
+        try {
+          db.prepare(`
+            CREATE TABLE IF NOT EXISTS aliases (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              alias TEXT UNIQUE NOT NULL,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              notes TEXT,
+              last_sender TEXT,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              last_used_at TEXT
+            )
+          `).run();
+          
+          console.log('Database initialized with aliases table');
+          db.close();
+          return true;
+        } catch (createError) {
+          console.log('Could not create aliases table:', createError.message);
+          db.close();
+          return false;
+        }
       }
-    });
-    
-    if (response.ok) {
-      console.log('Database check successful via aliases API');
-      return true;
-    } else {
-      console.log('Database check failed - aliases API returned:', response.status);
-      return false;
+    } catch (dbError) {
+      console.log('Direct database connection failed:', dbError.message);
+      
+      // Fallback to API check - determine the correct port
+      const port = process.env.PORT || 3000;
+      const apiUrl = `http://localhost:${port}/api/aliases`;
+      
+      console.log('Trying API fallback at:', apiUrl);
+      
+      try {
+        const response = await fetch(apiUrl, {
+          headers: {
+            'Cookie': 'session=authenticated'
+          },
+          timeout: 5000
+        });
+        
+        if (response.ok) {
+          console.log('Database check successful via aliases API');
+          return true;
+        } else {
+          console.log('Database check failed - aliases API returned:', response.status, response.statusText);
+          return false;
+        }
+      } catch (fetchError) {
+        console.log('API fallback also failed:', fetchError.message);
+        return false;
+      }
     }
   } catch (error) {
     console.error('Database check failed:', error.message);
@@ -254,7 +311,7 @@ export async function GET() {
       lastChecked: new Date().toISOString(),
       warnings: warnings,
       details: {
-        database: databaseHealth ? 'Database accessible via API' : 'Database connection failed',
+        database: databaseHealth ? 'Database accessible and aliases table ready' : 'Database connection failed - check DB_PATH and permissions',
         smtp: smtpHealth ? 'SMTP port 25 is listening' : 'SMTP port 25 not accessible (normal in dev mode)',
         ddns: ddnsHealth.enabled ? 
           `DDNS ${ddnsHealth.status} (${ddnsHealth.provider || 'no provider'})` : 
@@ -262,7 +319,9 @@ export async function GET() {
         security: securityHealth.fail2ban ? 
           `Security active: ${securityHealth.activeBans} banned IPs, ${securityHealth.recentEvents} recent events` :
           'Security monitoring available but fail2ban not running',
-        environment: process.env.NODE_ENV || 'development'
+        environment: process.env.NODE_ENV || 'development',
+        dbPath: process.env.DB_PATH || '/data/aliases.db',
+        port: process.env.PORT || 3000
       }
     };
     

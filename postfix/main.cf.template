@@ -10,6 +10,11 @@ compatibility_level = 3.6
 inet_interfaces = all
 inet_protocols = ipv4
 
+# DNS resolver configuration for Docker containers
+smtp_dns_resolver_options = res_defnames res_dnsrch
+smtp_host_lookup = dns
+lmtp_host_lookup = dns
+
 # Disable local delivery: we don't use local mailbox
 mydestination =
 local_recipient_maps =
@@ -22,7 +27,7 @@ virtual_transport = ghostinbox:
 relayhost = [smtp.gmail.com]:587
 smtp_tls_security_level = encrypt
 smtp_sasl_auth_enable = yes
-smtp_sasl_password_maps = static:{{REAL_EMAIL}}:{{GMAIL_APP_PASSWORD}}
+smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
 smtp_sasl_security_options = noanonymous
 smtp_tls_security_level = encrypt
 smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt
@@ -51,6 +56,11 @@ smtpd_recipient_restrictions =
     reject_rbl_dnsbl zen.spamhaus.org,
     reject_rbl_dnsbl bl.spamcop.net,
     permit
+
+# MUA (Mail User Agent) restrictions for submission ports
+mua_sender_restrictions = permit_sasl_authenticated,reject
+mua_client_restrictions = permit_sasl_authenticated,reject
+mua_helo_restrictions = permit_sasl_authenticated,reject_invalid_helo_hostname,reject_non_fqdn_helo_hostname,permit
 
 smtpd_sender_restrictions = 
     reject_non_fqdn_sender,
