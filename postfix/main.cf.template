@@ -3,6 +3,9 @@
 myhostname = ghostinbox
 mydomain = {{MY_DOMAIN}}
 
+# Disable backwards compatibility (add this line)
+compatibility_level = 3.6
+
 # Listen on all interfaces
 inet_interfaces = all
 inet_protocols = ipv4
@@ -17,16 +20,14 @@ virtual_transport = ghostinbox:
 
 # Configure Gmail as the relay host for outgoing mail
 relayhost = [smtp.gmail.com]:587
-smtp_use_tls = yes
+smtp_tls_security_level = encrypt
 smtp_sasl_auth_enable = yes
-# Use a static password map: user:password
 smtp_sasl_password_maps = static:{{REAL_EMAIL}}:{{GMAIL_APP_PASSWORD}}
 smtp_sasl_security_options = noanonymous
 smtp_tls_security_level = encrypt
 smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt
 
 # Anti-spam and abuse prevention measures
-# Rate limiting: max 20 messages per minute per client IP
 anvil_rate_time_unit = 60s
 smtpd_client_connection_rate_limit = 10
 smtpd_client_message_rate_limit = 20
@@ -63,7 +64,6 @@ smtpd_client_restrictions =
     reject_rbl_dnsbl zen.spamhaus.org,
     permit
 
-# Require HELO/EHLO
 smtpd_helo_required = yes
 smtpd_helo_restrictions = 
     permit_mynetworks,
@@ -71,9 +71,7 @@ smtpd_helo_restrictions =
     reject_invalid_helo_hostname,
     permit
 
-# Trusted networks (only localhost)
 mynetworks = 127.0.0.0/8, [::1]/128
 
-# Logging for security monitoring
 maillog_file = /var/log/mail.log
 smtpd_tls_loglevel = 1
